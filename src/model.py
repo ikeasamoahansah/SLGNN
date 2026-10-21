@@ -8,7 +8,7 @@ from torch_geometric.utils import scatter
 
 from utils import *
 
-device = 'cpu'
+device = 'cuda:0'
 
 
 class GAT(nn.Module):
@@ -18,6 +18,7 @@ class GAT(nn.Module):
         self.num_layers = num_layers
         self.gat_layers = nn.ModuleList()
         self.activation = activation
+        self.feat_drop = nn.Dropout(p=feat_drop)
         self.gat_conv = GATConv(
             in_channels=in_dim,
             out_channels=num_hidden,
@@ -61,12 +62,12 @@ class GAT(nn.Module):
             h = inputs
 
             for l in range(self.num_layers):
-                h = self.feat_dropout(h)
+                h = self.feat_drop(h)
                 h = self.gat_layers[l](h, edge_index)
                 if self.activation is not None:
                     h = self.activation(h)
 
-            h = self.feat_dropout(h)
+            h = self.feat_drop(h)
             logits = self.gat_layers[-1](h, edge_index)
             return logits
 
@@ -363,8 +364,7 @@ class SLModel(nn.Module):
         self.mess_dropout = args_config.mess_dropout
         self.mess_dropout_rate = args_config.mess_dropout_rate
         self.ind = args_config.ind
-        self.device = torch.device("cpu") #if args_config.cuda \
-                                                                      #else torch.device("cpu")
+        self.device = torch.device("cuda") if args_config.cuda else torch.device("cpu")
         self.sl_adj = sl_adj
         self.kg = kg
         self.edge_index, self.edge_type = self._get_edges(kg)

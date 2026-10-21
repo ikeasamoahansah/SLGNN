@@ -108,7 +108,7 @@ for i in range(5):
 
     model = SLModel(sl_data.n_gene, n_relations, n_entities, args, kg_graph,
                     sl_adj,
-                    sl_data.reindex_dict).to('cpu')
+                    sl_data.reindex_dict).to('cuda:' + str(args.gpu_id))
 
     train_dataset = KGCNDataset(train_df)
     valid_dataset = KGCNDataset(val_df)
@@ -131,14 +131,14 @@ for i in range(5):
     with_loss = 0
     with_cor = 0
     for epoch in range(args.epoch):
-        labels_train = torch.tensor([]).to('cpu')
-        logits_train = torch.tensor([]).to('cpu')
+        labels_train = torch.tensor([]).to('cuda:' + str(args.gpu_id))
+        logits_train = torch.tensor([]).to('cuda:' + str(args.gpu_id))
         running_loss = 0
         train_cor = 0
         for i, (gene_a, gene_b, labels) in enumerate(train_loader):
-            gene_a = gene_a.to('cpu')
-            gene_b = gene_b.to('cpu')
-            labels = labels.to('cpu')
+            gene_a = gene_a.to('cuda:' + str(args.gpu_id))
+            gene_b = gene_b.to('cuda:' + str(args.gpu_id))
+            labels = labels.to('cuda:' + str(args.gpu_id))
             logits, emb_loss, cor_loss, cor = model(gene_a, gene_b)
             labels_train = torch.cat((labels_train, labels))
             logits_train = torch.cat((logits_train, logits))
@@ -156,12 +156,12 @@ for i in range(5):
             valid_loss = 0
             total_roc = 0
             valid_cor = 0
-            labels_valid = torch.tensor([]).to('cpu')
-            logits_valid = torch.tensor([]).to('cpu')
+            labels_valid = torch.tensor([]).to('cuda:' + str(args.gpu_id))
+            logits_valid = torch.tensor([]).to('cuda:' + str(args.gpu_id))
             for i, (gene_a, gene_b, labels) in enumerate(valid_loader):
-                gene_a, gene_b, labels = gene_a.to(
-                    'cpu'), gene_b.to(
-                        'cpu'), labels.to('cpu')
+                gene_a, gene_b, labels = gene_a.to('cuda:' + str(args.gpu_id)),
+                gene_b.to('cuda:' + str(args.gpu_id))
+                , labels.to('cuda:' + str(args.gpu_id))
                 logits, _, _, cor = model(gene_a, gene_b)
                 labels_valid = torch.cat((labels_valid, labels))
                 logits_valid = torch.cat((logits_valid, logits))
@@ -183,8 +183,8 @@ for i in range(5):
             test_loss = 0
             total_roc = 0
             test_cor = 0
-            labels_test = torch.tensor([]).to('cpu')
-            logits_test = torch.tensor([]).to('cpu')
+            labels_test = torch.tensor([]).to('cuda:' + str(args.gpu_id))
+            logits_test = torch.tensor([]).to('cuda:' + str(args.gpu_id))
             for i, (gene_a, gene_b, labels) in enumerate(test_loader):
                 gene_a, gene_b, labels = gene_a.to(
                     'cuda:' + str(args.gpu_id)), gene_b.to(

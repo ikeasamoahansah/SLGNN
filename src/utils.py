@@ -5,7 +5,6 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import torch
-import dgl
 import torch.optim as optim
 from scipy.sparse import csr_matrix
 from sklearn.metrics import roc_auc_score, precision_recall_curve, auc
@@ -82,5 +81,3 @@ class KGCNDataset(torch.utils.data.Dataset):
         gene_b = np.array(self.df.iloc[idx]['gene_b'])
         label = np.array(self.df.iloc[idx]['label'], dtype=np.float32)
         return gene_a, gene_b, label
-
-
