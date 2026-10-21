@@ -114,7 +114,7 @@ class Aggregator(nn.Module):
         input_emb = entity_agg[reidx]
         #input_emb = input_emb * latent_emb[i]
         for i in range(self.n_factors):
-            output_emb = GATConv[i](sl_graph, input_emb)
+            output_emb = GATConv[i](sl_graph.edge_index, input_emb)
             output_emb_i = output_emb * latent_emb[i]
             output_sl.append(output_emb_i)
         output_sl = torch.stack(output_sl)

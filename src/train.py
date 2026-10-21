@@ -159,9 +159,7 @@ for i in range(5):
             labels_valid = torch.tensor([]).to('cuda:' + str(args.gpu_id))
             logits_valid = torch.tensor([]).to('cuda:' + str(args.gpu_id))
             for i, (gene_a, gene_b, labels) in enumerate(valid_loader):
-                gene_a, gene_b, labels = gene_a.to('cuda:' + str(args.gpu_id)),
-                gene_b.to('cuda:' + str(args.gpu_id))
-                , labels.to('cuda:' + str(args.gpu_id))
+                gene_a, gene_b, labels = gene_a.to('cuda:' + str(args.gpu_id)), gene_b.to('cuda:' + str(args.gpu_id)), labels.to('cuda:' + str(args.gpu_id))
                 logits, _, _, cor = model(gene_a, gene_b)
                 labels_valid = torch.cat((labels_valid, labels))
                 logits_valid = torch.cat((logits_valid, logits))
