@@ -1,18 +1,14 @@
-from code import interact
-import random
-from traceback import print_tb
-
-import dgl.function as fn
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dgl.nn import GATConv
-from torch_scatter import scatter_mean
+from torch_geometric.data import Data
+from torch_geometric.nn import GATConv
+from torch_geometric.utils import scatter
 
 from utils import *
 
-device = 'cuda:0'
+device = 'cpu'
 
 
 class GAT(nn.Module):
@@ -22,29 +18,57 @@ class GAT(nn.Module):
         self.num_layers = num_layers
         self.gat_layers = nn.ModuleList()
         self.activation = activation
+        self.gat_conv = GATConv(
+            in_channels=in_dim,
+            out_channels=num_hidden,
+            heads=heads[0],
+            concat=True,
+            negative_slope=negative_slope,
+            dropout=attn_drop,
+            add_self_loops=False,
+        )
         # input projection (no residual)
-        self.gat_layers.append(
-            GATConv(in_dim, num_hidden, heads[0], feat_drop, attn_drop,
-                    negative_slope, False, self.activation))
+        self.gat_layers.append(self.gat_conv)
         # hidden layers
         for l in range(1, num_layers):
             # due to multi-head, the in_dim = num_hidden * num_heads
             self.gat_layers.append(
-                GATConv(num_hidden * heads[l - 1], num_hidden, heads[l],
-                        feat_drop, attn_drop, negative_slope, residual,
-                        self.activation))
+                GATConv(
+                    in_channels=num_hidden * heads[l-1],
+                    out_channels=num_hidden,
+                    heads=heads[l],
+                    concat=True,
+                    negative_slope=negative_slope,
+                    dropout=attn_drop,
+                    add_self_loops=False,
+                    residual=residual
+                ))
         # output projection
         self.gat_layers.append(
-            GATConv(num_hidden * heads[-2], num_classes, heads[-1], feat_drop,
-                    attn_drop, negative_slope, residual, None))
+                    GATConv(
+                        in_channels=num_hidden * heads[num_layers - 1],
+                        out_channels=num_classes,
+                        heads=heads[num_layers],
+                        concat=False,
+                        negative_slope=negative_slope,
+                        dropout=attn_drop,
+                        add_self_loops=False,
+                        residual=residual,
+                    )
+                )
 
-    def forward(self, g, inputs):
-        h = inputs
-        for l in range(self.num_layers):
-            h = self.gat_layers[l](g, h).flatten(1)
-        # output projection
-        logits = self.gat_layers[-1](g, h).mean(1)
-        return logits
+    def forward(self, edge_index, inputs):
+            h = inputs
+
+            for l in range(self.num_layers):
+                h = self.feat_dropout(h)
+                h = self.gat_layers[l](h, edge_index)
+                if self.activation is not None:
+                    h = self.activation(h)
+
+            h = self.feat_dropout(h)
+            logits = self.gat_layers[-1](h, edge_index)
+            return logits
 
 
 class Aggregator(nn.Module):
@@ -69,8 +93,8 @@ class Aggregator(nn.Module):
         head, tail = edge_index
         edge_relation_emb = weight[edge_type]
         neigh_relation_emb = entity_emb[
-            tail] * edge_relation_emb  # [-1, channel] 
-        entity_agg = scatter_mean(src=neigh_relation_emb,
+            tail] * edge_relation_emb  # [-1, channel]
+        entity_agg = scatter(src=neigh_relation_emb,
                                   index=head,
                                   dim_size=n_entities,
                                   dim=0)
@@ -151,11 +175,19 @@ class GraphConv(nn.Module):
 
         self.dropout = nn.Dropout(p=mess_dropout_rate)  # mess dropout
 
+    # def get_sl_graph(self):
+    #     interact_mat = self.interact_mat
+    #     indices = interact_mat._indices()
+    #     u= torch.tensor(indices[0])
+    #     v = torch.tensor(indices[1])
+
+    #    # Correct initialization
+    #     g = dgl.graph((u, v))
+    #     return g.to(device)
+
     def get_sl_graph(self):
-        interact_mat = self.interact_mat
-        indices = interact_mat._indices()
-        g = dgl.graph((indices[0], indices[1]))
-        return g.to(device)
+        edge_index = self.interact_mat._indices().to(dtype=torch.long)
+        return Data(edge_index=edge_index).to(device)
 
     def _edge_sampling(self, edge_index, edge_type, rate=0.5):
         # edge_index: [2, -1]
@@ -331,8 +363,8 @@ class SLModel(nn.Module):
         self.mess_dropout = args_config.mess_dropout
         self.mess_dropout_rate = args_config.mess_dropout_rate
         self.ind = args_config.ind
-        self.device = torch.device("cuda:" + str(args_config.gpu_id)) if args_config.cuda \
-                                                                      else torch.device("cpu")
+        self.device = torch.device("cpu") #if args_config.cuda \
+                                                                      #else torch.device("cpu")
         self.sl_adj = sl_adj
         self.kg = kg
         self.edge_index, self.edge_type = self._get_edges(kg)

@@ -1,15 +1,8 @@
-import random
-from code import interact
-from traceback import print_tb
-from turtle import forward
-
-import dgl.function as fn
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from dgl.nn import GATConv
-from torch_scatter import scatter_mean
+from torch_geometric.nn import GATConv
 
 from utils import *
 
