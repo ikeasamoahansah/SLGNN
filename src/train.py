@@ -135,7 +135,7 @@ for i in range(5):
         logits_train = torch.tensor([]).to('cuda:' + str(args.gpu_id))
         running_loss = 0
         train_cor = 0
-        for i, (gene_a, gene_b, labels) in enumerate(train_loader):
+        for gene_a, gene_b, labels in tqdm(train_loader, desc=f'epoch {epoch+1}'):
             gene_a = gene_a.to('cuda:' + str(args.gpu_id))
             gene_b = gene_b.to('cuda:' + str(args.gpu_id))
             labels = labels.to('cuda:' + str(args.gpu_id))

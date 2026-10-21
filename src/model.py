@@ -1,3 +1,5 @@
+from functools import reduce
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -98,7 +100,7 @@ class Aggregator(nn.Module):
         entity_agg = scatter(src=neigh_relation_emb,
                                   index=head,
                                   dim_size=n_entities,
-                                  dim=0)
+                                  dim=0, reduce="mean")
 
         latent_emb = torch.mm(nn.Softmax(dim=-1)(disen_weight_att),
                               weight)  #[n_factors, channel]
