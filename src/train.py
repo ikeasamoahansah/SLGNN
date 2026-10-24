@@ -171,11 +171,11 @@ for i in range(5):
         # then every eval batch is scored against the cached embeddings.
         # The old code re-ran the full forward (3 message-passing hops +
         # 4 factor-specific GATs) for every eval batch.
-        def run_eval(loader):
+        def run_eval(loader, desc):
             logits_list, labels_list = [], []
             with torch.no_grad():
                 entity_out, gene_out = model.generate()
-                for gene_a, gene_b, labels in loader:
+                for gene_a, gene_b, labels in tqdm(loader, desc=desc):
                     gene_a = gene_a.to(device)
                     gene_b = gene_b.to(device)
                     labels = labels.to(device)
@@ -198,7 +198,7 @@ for i in range(5):
             #     labels_valid = torch.cat((labels_valid, labels))
             #     logits_valid = torch.cat((logits_valid, logits))
             #     valid_cor += cor.item()
-            logits_valid, labels_valid = run_eval(valid_loader)
+            logits_valid, labels_valid = run_eval(valid_loader, desc=f'valid epoch {epoch+1}')
             valid_loss = criterion(logits_valid, labels_valid).item()
             # valid_cor = valid_cor / len(valid_loader)
             valid_auc = roc_auc_score(labels_valid.cpu().numpy(),
@@ -230,7 +230,7 @@ for i in range(5):
             #     labels_test = torch.cat((labels_test, labels))
             #     logits_test = torch.cat((logits_test, logits))
             #     test_cor += cor.item()
-            logits_test, labels_test = run_eval(test_loader)
+            logits_test, labels_test = run_eval(test_loader, desc=f'test epoch {epoch+1}')
             test_loss = criterion(logits_test, labels_test).item()
             # test_cor = test_cor / len(test_loader)
             test_auc = roc_auc_score(labels_test.cpu().numpy(),
