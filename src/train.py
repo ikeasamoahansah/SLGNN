@@ -25,6 +25,14 @@ def setup_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 
+def str2bool(v):
+    # FIX: proper boolean parse; argparse's type=bool accepts ANY non-empty
+    # string (so '--node_dropout False' used to evaluate to True)
+    if isinstance(v, bool):
+        return v
+    return v.lower() in ('true', '1', 't', 'yes')
+
+
 parser = argparse.ArgumentParser()
 
 parser.add_argument('--epoch', type=int, default=100, help='number of epochs')
@@ -39,12 +47,13 @@ parser.add_argument('--sim_regularity',
                     type=float,
                     default=1e-3,
                     help='regularization weight for latent factor')
+# FIX: type=bool -> type=str2bool (argparse booleans)
 parser.add_argument("--inverse_r",
-                    type=bool,
+                    type=str2bool,
                     default=True,
                     help="consider inverse relation or not")
 parser.add_argument("--node_dropout",
-                    type=bool,
+                    type=str2bool,
                     default=True,
                     help="consider node dropout or not")
 parser.add_argument("--node_dropout_rate",
@@ -52,7 +61,7 @@ parser.add_argument("--node_dropout_rate",
                     default=0.5,
                     help="ratio of node dropout")
 parser.add_argument("--mess_dropout",
-                    type=bool,
+                    type=str2bool,
                     default=True,
                     help="consider message dropout or not")
 parser.add_argument("--mess_dropout_rate",
@@ -60,7 +69,8 @@ parser.add_argument("--mess_dropout_rate",
                     default=0.1,
                     help="ratio of node dropout")
 
-parser.add_argument("--cuda", type=bool, default=True, help="use gpu or not")
+# FIX: type=str2bool (argparse booleans)
+parser.add_argument("--cuda", type=str2bool, default=True, help="use gpu or not")
 parser.add_argument("--gpu_id", type=int, default=0, help="gpu id")
 
 parser.add_argument("--n_factors",
@@ -79,6 +89,8 @@ parser.add_argument('--context_hops',
                     help='number of context hops')
 
 args = parser.parse_known_args()[0]
+# FIX: single device constant instead of re-building the string everywhere
+device = torch.device('cuda:{}'.format(args.gpu_id))
 
 kg_graph, n_entities, n_relations = load_data(args)
 print('Hyperparameters:')
@@ -108,7 +120,7 @@ for i in range(5):
 
     model = SLModel(sl_data.n_gene, n_relations, n_entities, args, kg_graph,
                     sl_adj,
-                    sl_data.reindex_dict).to('cuda:' + str(args.gpu_id))
+                    sl_data.reindex_dict).to(device)
 
     train_dataset = KGCNDataset(train_df)
     valid_dataset = KGCNDataset(val_df)
@@ -131,17 +143,20 @@ for i in range(5):
     with_loss = 0
     with_cor = 0
     for epoch in range(args.epoch):
-        labels_train = torch.tensor([]).to('cuda:' + str(args.gpu_id))
-        logits_train = torch.tensor([]).to('cuda:' + str(args.gpu_id))
+        # FIX: cheap list accumulation; the old torch.cat-per-batch loop was
+        # O(n^2) reallocation (and the tensors were never even used afterwards)
+        # labels_train = torch.tensor([]).to(device)
+        # logits_train = torch.tensor([]).to(device)
+        labels_train, logits_train = [], []
         running_loss = 0
         train_cor = 0
         for gene_a, gene_b, labels in tqdm(train_loader, desc=f'epoch {epoch+1}'):
-            gene_a = gene_a.to('cuda:' + str(args.gpu_id))
-            gene_b = gene_b.to('cuda:' + str(args.gpu_id))
-            labels = labels.to('cuda:' + str(args.gpu_id))
+            gene_a = gene_a.to(device)
+            gene_b = gene_b.to(device)
+            labels = labels.to(device)
             logits, emb_loss, cor_loss, cor = model(gene_a, gene_b)
-            labels_train = torch.cat((labels_train, labels))
-            logits_train = torch.cat((logits_train, logits))
+            labels_train.append(labels)
+            logits_train.append(logits)
             loss = criterion(logits, labels)
             loss = loss + emb_loss + cor_loss
             optimizer.zero_grad()
@@ -152,57 +167,80 @@ for i in range(5):
         running_loss = running_loss / len(train_loader)
         train_cor = train_cor / len(train_loader)
 
-        with torch.no_grad():
-            valid_loss = 0
-            total_roc = 0
-            valid_cor = 0
-            labels_valid = torch.tensor([]).to('cuda:' + str(args.gpu_id))
-            logits_valid = torch.tensor([]).to('cuda:' + str(args.gpu_id))
-            for i, (gene_a, gene_b, labels) in enumerate(valid_loader):
-                gene_a, gene_b, labels = gene_a.to('cuda:' + str(args.gpu_id)), gene_b.to('cuda:' + str(args.gpu_id)), labels.to('cuda:' + str(args.gpu_id))
-                logits, _, _, cor = model(gene_a, gene_b)
-                labels_valid = torch.cat((labels_valid, labels))
-                logits_valid = torch.cat((logits_valid, logits))
-                valid_cor += cor.item()
-            valid_loss = criterion(logits_valid, labels_valid).item()
-            valid_cor = valid_cor / len(valid_loader)
-            valid_auc = roc_auc_score(labels_valid.cpu().detach().numpy(),
-                                      logits_valid.cpu().detach().numpy())
-            prec, reca, _ = precision_recall_curve(
-                labels_valid.cpu().detach().numpy(),
-                logits_valid.cpu().detach().numpy())
+        # FIX: GCN embedding propagation is run ONCE per epoch via generate(),
+        # then every eval batch is scored against the cached embeddings.
+        # The old code re-ran the full forward (3 message-passing hops +
+        # 4 factor-specific GATs) for every eval batch.
+        def run_eval(loader):
+            logits_list, labels_list = [], []
+            with torch.no_grad():
+                entity_out, gene_out = model.generate()
+                for gene_a, gene_b, labels in loader:
+                    gene_a = gene_a.to(device)
+                    gene_b = gene_b.to(device)
+                    labels = labels.to(device)
+                    # FIX: no full forward pass; score from cached embeddings
+                    logits = model.score(gene_out, entity_out, gene_a, gene_b)
+                    logits_list.append(logits)
+                    labels_list.append(labels)
+            return torch.cat(logits_list), torch.cat(labels_list)
 
+        with torch.no_grad():
+            # valid_cor / total_roc were computed but never used -> removed
+            # valid_loss = 0
+            # total_roc = 0
+            # valid_cor = 0
+            # labels_valid = torch.tensor([]).to(device)
+            # logits_valid = torch.tensor([]).to(device)
+            # for i, (gene_a, gene_b, labels) in enumerate(valid_loader):
+            #     gene_a, gene_b, labels = gene_a.to(device), gene_b.to(device), labels.to(device)
+            #     logits, _, _, cor = model(gene_a, gene_b)
+            #     labels_valid = torch.cat((labels_valid, labels))
+            #     logits_valid = torch.cat((logits_valid, logits))
+            #     valid_cor += cor.item()
+            logits_valid, labels_valid = run_eval(valid_loader)
+            valid_loss = criterion(logits_valid, labels_valid).item()
+            # valid_cor = valid_cor / len(valid_loader)
+            valid_auc = roc_auc_score(labels_valid.cpu().numpy(),
+                                      logits_valid.cpu().numpy())
+            prec, reca, _ = precision_recall_curve(
+                labels_valid.cpu().numpy(), logits_valid.cpu().numpy())
+
+            # FIX: threshold the sigmoid at 0.5; torch.round() on raw logits
+            # only matched when the model still returned sigmoid probabilities
             valid_f1 = f1_score(
-                labels_valid.cpu().detach().numpy(),
-                (torch.round(logits_valid)).cpu().detach().numpy())
+                labels_valid.cpu().numpy(),
+                (torch.sigmoid(logits_valid) > 0.5).float().cpu().numpy())
             valid_aupr = auc(reca, prec)
 
         with torch.no_grad():
-            test_loss = 0
-            total_roc = 0
-            test_cor = 0
-            labels_test = torch.tensor([]).to('cuda:' + str(args.gpu_id))
-            logits_test = torch.tensor([]).to('cuda:' + str(args.gpu_id))
-            for i, (gene_a, gene_b, labels) in enumerate(test_loader):
-                gene_a, gene_b, labels = gene_a.to(
-                    'cuda:' + str(args.gpu_id)), gene_b.to(
-                        'cuda:' +
-                        str(args.gpu_id)), labels.to('cuda:' +
-                                                     str(args.gpu_id))
-                logits, _, _, cor = model(gene_a, gene_b)
-                labels_test = torch.cat((labels_test, labels))
-                logits_test = torch.cat((logits_test, logits))
-                test_cor += cor.item()
+            # test_cor / total_roc were computed but never used -> removed
+            # test_loss = 0
+            # total_roc = 0
+            # test_cor = 0
+            # labels_test = torch.tensor([]).to(device)
+            # logits_test = torch.tensor([]).to(device)
+            # for i, (gene_a, gene_b, labels) in enumerate(test_loader):
+            #     gene_a, gene_b, labels = gene_a.to(
+            #         'cuda:' + str(args.gpu_id)), gene_b.to(
+            #             'cuda:' +
+            #             str(args.gpu_id)), labels.to('cuda:' +
+            #                                          str(args.gpu_id))
+            #     logits, _, _, cor = model(gene_a, gene_b)
+            #     labels_test = torch.cat((labels_test, labels))
+            #     logits_test = torch.cat((logits_test, logits))
+            #     test_cor += cor.item()
+            logits_test, labels_test = run_eval(test_loader)
             test_loss = criterion(logits_test, labels_test).item()
-            test_cor = test_cor / len(test_loader)
-            test_auc = roc_auc_score(labels_test.cpu().detach().numpy(),
-                                     logits_test.cpu().detach().numpy())
+            # test_cor = test_cor / len(test_loader)
+            test_auc = roc_auc_score(labels_test.cpu().numpy(),
+                                     logits_test.cpu().numpy())
             prec, reca, _ = precision_recall_curve(
-                labels_test.cpu().detach().numpy(),
-                logits_test.cpu().detach().numpy())
+                labels_test.cpu().numpy(), logits_test.cpu().numpy())
+            # FIX: same sigmoid-threshold fix as above
             test_f1 = f1_score(
-                labels_test.cpu().detach().numpy(),
-                (torch.round(logits_test)).cpu().detach().numpy())
+                labels_test.cpu().numpy(),
+                (torch.sigmoid(logits_test) > 0.5).float().cpu().numpy())
             test_aupr = auc(reca, prec)
 
         print(
@@ -218,7 +256,8 @@ for i in range(5):
             best_test_aupr = test_aupr
             best_test_f1 = test_f1
             with_loss = test_loss
-            with_cor = test_cor
+            # FIX: test_cor no longer tracked during eval (see run_eval)
+            # with_cor = test_cor
             cnt_wait = 0
         else:
             cnt_wait += 1

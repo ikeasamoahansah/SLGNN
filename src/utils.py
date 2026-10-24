@@ -43,20 +43,23 @@ def DistanceCorrelation(tensor_1, tensor_2):
 
 def load_data(args):
     kg2id_np = np.loadtxt('../data/SL/raw/kg2id' + '.txt', dtype=np.int64)
-    max = 0
-    r_max = 0
-    for i in range(len(kg2id_np)):
-        h = kg2id_np[i][0]
-        t = kg2id_np[i][2]
-        r = kg2id_np[i][1]
-        if h > max:
-            max = h
-        if t > max:
-            max = t
-        if r > r_max:
-            r_max = r
-    n_entities = max + 1
-    n_relations = r_max + 1
+    # FIX: vectorized instead of a python loop over ~2.2M rows
+    # max = 0
+    # r_max = 0
+    # for i in range(len(kg2id_np)):
+    #     h = kg2id_np[i][0]
+    #     t = kg2id_np[i][2]
+    #     r = kg2id_np[i][1]
+    #     if h > max:
+    #         max = h
+    #     if t > max:
+    #         max = t
+    #     if r > r_max:
+    #         r_max = r
+    # n_entities = max + 1
+    # n_relations = r_max + 1
+    n_entities = int(kg2id_np[:, [0, 2]].max()) + 1
+    n_relations = int(kg2id_np[:, 1].max()) + 1
 
     graph = nx.MultiDiGraph()
     for i in range(len(kg2id_np)):
@@ -71,13 +74,18 @@ def load_data(args):
 
 class KGCNDataset(torch.utils.data.Dataset):
     def __init__(self, df):
-        self.df = df
+        # FIX: cache numpy arrays once; the old __getitem__ did a pandas
+        # df.iloc row lookup and allocated 3 single-element arrays per sample
+        # self.df = df
+        self.gene_a = df['gene_a'].values
+        self.gene_b = df['gene_b'].values
+        self.label = df['label'].values.astype(np.float32)
 
     def __len__(self):
-        return len(self.df)
+        return len(self.gene_a)
 
     def __getitem__(self, idx):
-        gene_a = np.array(self.df.iloc[idx]['gene_a'])
-        gene_b = np.array(self.df.iloc[idx]['gene_b'])
-        label = np.array(self.df.iloc[idx]['label'], dtype=np.float32)
-        return gene_a, gene_b, label
+        # gene_a = np.array(self.df.iloc[idx]['gene_a'])
+        # gene_b = np.array(self.df.iloc[idx]['gene_b'])
+        # label = np.array(self.df.iloc[idx]['label'], dtype=np.float32)
+        return self.gene_a[idx], self.gene_b[idx], self.label[idx]

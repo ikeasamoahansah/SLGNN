@@ -83,6 +83,14 @@ class Aggregator(nn.Module):
         self.n_genes = n_genes
         self.n_factors = n_factors
         self.reindex_dict = reindex_dict
+        # FIX: precompute the gene -> entity index tensor once.
+        # Registered as a buffer so it is moved to GPU together with the module
+        # (the old code rebuilt a n_genes-sized dict + tensor on EVERY call)
+        self.register_buffer(
+            "reidx",
+            torch.tensor(
+                [reindex_dict.get(k, k) for k in range(n_genes)],
+                dtype=torch.long))
 
     def forward(self, GATConv, sl_graph, entity_emb, gene_sl_emb, latent_emb,
                 edge_index, edge_type, interact_mat, weight, disen_weight_att):
@@ -102,15 +110,24 @@ class Aggregator(nn.Module):
                                   dim_size=n_entities,
                                   dim=0, reduce="mean")
 
-        latent_emb = torch.mm(nn.Softmax(dim=-1)(disen_weight_att),
+        # FIX: compute the softmax-weight product once and reuse it below
+        # (the old code recomputed this mm twice per call)
+        # latent_emb = torch.mm(nn.Softmax(dim=-1)(disen_weight_att),
+        #                       weight)  #[n_factors, channel]
+        latent_emb = torch.mm(F.softmax(disen_weight_att, dim=-1),
                               weight)  #[n_factors, channel]
         score_ = torch.mm(gene_sl_emb, latent_emb.t())
 
-        score = nn.Softmax(dim=1)(score_).unsqueeze(-1)
+        # FIX: functional softmax instead of re-instantiating nn.Softmax
+        # score = nn.Softmax(dim=1)(score_).unsqueeze(-1)
+        score = F.softmax(score_, dim=1).unsqueeze(-1)
 
-        gene_list = [i for i in range(self.n_genes)]
-        reidx_dict = dict([(key, self.reindex_dict[key]) for key in gene_list])
-        reidx = torch.tensor(list(reidx_dict.values()))
+        # FIX: use the precomputed index buffer instead of rebuilding a
+        # n_genes-sized python dict + tensor on every call
+        # gene_list = [i for i in range(self.n_genes)]
+        # reidx_dict = dict([(key, self.reindex_dict[key]) for key in gene_list])
+        # reidx = torch.tensor(list(reidx_dict.values()))
+        reidx = self.reidx
         gene_agg = torch.sparse.mm(interact_mat, entity_emb[reidx])
         output_sl = []
         input_emb = entity_agg[reidx]
@@ -121,8 +138,10 @@ class Aggregator(nn.Module):
             output_sl.append(output_emb_i)
         output_sl = torch.stack(output_sl)
         output_sl = output_sl.permute(1, 0, 2)
-        disen_weight = torch.mm(nn.Softmax(dim=-1)(disen_weight_att),
-                                weight).expand(n_genes, n_factors, channel)
+        # FIX: this mm was a duplicate of `latent_emb` above and the result is
+        # never used -> dead code removed
+        # disen_weight = torch.mm(nn.Softmax(dim=-1)(disen_weight_att),
+        #                         weight).expand(n_genes, n_factors, channel)
 
         gene_return = gene_agg + (output_sl * score).sum(dim=1)
         #disen_weight_att [n_factors, n_relations]
@@ -196,16 +215,21 @@ class GraphConv(nn.Module):
         # edge_index: [2, -1]
         # edge_type: [-1]
         n_edges = edge_index.shape[1]
-        random_indices = np.random.choice(n_edges,
-                                          size=int(n_edges * rate),
-                                          replace=False)
+        # FIX: sample on-device instead of a numpy round-trip
+        # random_indices = np.random.choice(n_edges,
+        #                                   size=int(n_edges * rate),
+        #                                   replace=False)
+        random_indices = torch.randperm(
+            n_edges, device=edge_index.device)[:int(n_edges * rate)]
         return edge_index[:, random_indices], edge_type[random_indices]
 
     def _sparse_dropout(self, x, rate=0.5):
         noise_shape = x._nnz()  #number of none zeros
         #稀疏tensor的dropout
-        random_tensor = rate
-        random_tensor += torch.rand(noise_shape).to(x.device)
+        # FIX: generate the noise directly on the device
+        # random_tensor = rate
+        # random_tensor += torch.rand(noise_shape).to(x.device)
+        random_tensor = rate + torch.rand(noise_shape, device=x.device)
         dropout_mask = torch.floor(random_tensor).type(torch.bool)
         i = x._indices()
         v = x._values()
@@ -213,7 +237,9 @@ class GraphConv(nn.Module):
         i = i[:, dropout_mask]
         v = v[dropout_mask]
 
-        out = torch.sparse.FloatTensor(i, v, x.shape).to(x.device)
+        # FIX: deprecated sparse constructor
+        # out = torch.sparse.FloatTensor(i, v, x.shape).to(x.device)
+        out = torch.sparse_coo_tensor(i, v, x.shape, device=x.device)
         return out * (1. / (1 - rate))
 
     # def _cul_cor_pro(self):
@@ -325,7 +351,9 @@ class GraphConv(nn.Module):
                 edge_index, edge_type, interact_mat, self.weight,
                 self.disen_weight_att)
             """message dropout"""
-            for_reg = output_gene.mean(dim=0)
+            # FIX: dead computation - immediately overwritten by the
+            # `if i == 0 / else` block below
+            # for_reg = output_gene.mean(dim=0)
             if mess_dropout:
                 entity_emb = self.dropout(entity_emb)
                 gene_emb = self.dropout(gene_emb)
@@ -355,6 +383,15 @@ class SLModel(nn.Module):
         self.n_genes = n_genes
         self.n_relations = n_relations
         self.reindex_dict = {y: x for x, y in reindex_dict.items()}
+        # FIX: precomputed lookup tensor (reindexed gene idx -> KG entity id),
+        # registered as a buffer so it moves to GPU with the module.
+        # The old code built a python dict for every batch, calling int(key)
+        # on a CUDA tensor once per element -> one GPU sync per sample
+        self.register_buffer(
+            "gene_reidx",
+            torch.tensor(
+                [self.reindex_dict[k] for k in range(n_genes)],
+                dtype=torch.long))
         self.n_entities = n_entities  # include items
         self.decay = args_config.l2
         self.sim_decay = args_config.sim_regularity
@@ -402,7 +439,9 @@ class SLModel(nn.Module):
         coo = X.tocoo()
         i = torch.LongTensor(np.array([coo.row, coo.col]))
         v = torch.from_numpy(coo.data).float()
-        return torch.sparse.FloatTensor(i, v, coo.shape)
+        # FIX: deprecated sparse constructor
+        # return torch.sparse.FloatTensor(i, v, coo.shape)
+        return torch.sparse_coo_tensor(i, v, coo.shape)
 
     def _get_indices(self, X):
         coo = X.tocoo()
@@ -415,8 +454,9 @@ class SLModel(nn.Module):
         return index.t().long().to(self.device), type.long().to(self.device)
 
     def forward(self, gene_a, gene_b):
-        gene_a = gene_a
-        gene_b = gene_b
+        # FIX: no-op self-assignments removed
+        # gene_a = gene_a
+        # gene_b = gene_b
         gene_emb = self.all_embed[:self.n_genes, :]
         item_emb = self.all_embed[self.n_genes:, :]
 
@@ -430,28 +470,55 @@ class SLModel(nn.Module):
             mess_dropout=self.mess_dropout,
             node_dropout=self.node_dropout)
         e_u = gene_gcn_emb[gene_a]
-        reidx_dict = dict([(key, self.reindex_dict[int(key)])
-                           for key in gene_b])
-        e_e = entity_gcn_emb[torch.tensor(list(reidx_dict.values()))]
+        # FIX: vectorized lookup on device. The old per-element loop over the
+        # CUDA tensor forced a GPU->CPU sync for EVERY sample in the batch
+        # reidx_dict = dict([(key, self.reindex_dict[int(key)])
+        #                    for key in gene_b])
+        # e_e = entity_gcn_emb[torch.tensor(list(reidx_dict.values()))]
+        e_e = entity_gcn_emb[self.gene_reidx[gene_b]]
         #e_e = entity_gcn_emb[gene_b]
 
         scores = (e_u * e_e).sum(dim=1)
         regularizer = (torch.norm(e_u)**2 + torch.norm(e_e)**2) / 2
         emb_loss = self.decay * regularizer / len(gene_a)
         cor_loss = self.sim_decay * (cor + cor_2)
-        return torch.sigmoid(scores), emb_loss, cor_loss, cor
+        # FIX: return raw scores so BCEWithLogitsLoss (used in train.py)
+        # receives true logits; the old code applied sigmoid and then
+        # BCEWithLogitsLoss applied another sigmoid on top (double sigmoid)
+        # return torch.sigmoid(scores), emb_loss, cor_loss, cor
+        return scores, emb_loss, cor_loss, cor
+
+    # FIX: efficient scoring for eval batches against embeddings that were
+    # precomputed ONCE with generate() (train.py now calls this)
+    def score(self, gene_out, entity_out, gene_a, gene_b):
+        return (gene_out[gene_a] * entity_out[self.gene_reidx[gene_b]]).sum(
+            dim=1)
 
     def generate(self):
         gene_emb = self.all_embed[:self.n_genes, :]
         item_emb = self.all_embed[self.n_genes:, :]
-        return self.gcn(gene_emb,
-                        item_emb,
-                        self.latent_emb,
-                        self.edge_index,
-                        self.edge_type,
-                        self.interact_mat,
-                        mess_dropout=False,
-                        node_dropout=False)[:-1]
+        # FIX: the old [:-1] slice returned THREE tensors (the cor loss was
+        # still included since GraphConv returns 4 values) -- generate() was
+        # never called, so this latent bug was hidden. Return only the
+        # two embedding tensors, as expected by SLModel.score / train.py
+        # return self.gcn(gene_emb,
+        #                 item_emb,
+        #                 self.latent_emb,
+        #                 self.edge_index,
+        #                 self.edge_type,
+        #                 self.interact_mat,
+        #                 mess_dropout=False,
+        #                 node_dropout=False)[:-1]
+        entity_gcn_emb, gene_gcn_emb, _, _ = self.gcn(
+            gene_emb,
+            item_emb,
+            self.latent_emb,
+            self.edge_index,
+            self.edge_type,
+            self.interact_mat,
+            mess_dropout=False,
+            node_dropout=False)
+        return entity_gcn_emb, gene_gcn_emb
 
     def rating(self, u_g_embeddings, i_g_embeddings):
         return torch.matmul(u_g_embeddings, i_g_embeddings.t())
